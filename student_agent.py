@@ -2,6 +2,8 @@ import gym
 import torch
 import torch.nn as nn
 import torchrl.modules as modules
+from torchvision import transforms as T
+from collections import deque
 
 
 class QNetwork(nn.Module):
@@ -27,8 +29,9 @@ class QNetwork(nn.Module):
         )
 
     def forward(self, x):
+        bsz = x.shape[0]
         x = self.conv(x)
-        x = x.view(x.size(0), -1)
+        x = x.view(bsz, -1)
         value = self.value_stream(x)
         advantage = self.advantage_stream(x)
         return value + advantage - advantage.mean(dim=1, keepdim=True)
@@ -42,13 +45,42 @@ class Agent(object):
         self.device = torch.device("cpu")
         if torch.cuda.is_available():
             self.device = torch.device("cuda")
-        model_state_dict = torch.load("dqn_best.pth", map_location=torch.device('cpu'))
+        model_state_dict = torch.load(
+            "dqn_best.pth", map_location=torch.device('cpu'), weights_only=True)
         self.dqn = QNetwork()
         self.dqn.load_state_dict(model_state_dict)
         self.dqn.to(self.device)
+        self.dqn.eval()
+
+        self.transform = T.Compose([
+            T.ToPILImage(),
+            T.Grayscale(),
+            T.Resize((84, 84)),
+            T.ToTensor()
+        ])
+
+        self.last_action = 0
+        self.frame_stack = deque(maxlen=4)
+        self.frame_count = 0
+        self.start = True
 
     def act(self, observation):
-        with torch.no_grad():
-            observation = torch.tensor(observation, dtype=torch.float32).unsqueeze(0).to(self.device)
-            action = self.dqn(observation).argmax().item()
-        return action
+        self.frame_count += 1
+        frame = self.transform(observation)
+        frame = (frame / 255)
+
+        if self.start:
+            self.start = False
+            for _ in range(4):
+                self.frame_stack.append(frame)
+
+        if self.frame_count % 4 == 0:
+            self.frame_stack.append(frame)
+            inputs = torch.concat(list(self.frame_stack), dim=0).unsqueeze(0)
+            inputs = inputs.to(self.device)
+            with torch.no_grad():
+                action = self.dqn(inputs).argmax().item()
+            self.last_action = action
+
+        return self.last_action
+
